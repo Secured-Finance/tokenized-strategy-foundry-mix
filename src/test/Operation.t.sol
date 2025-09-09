@@ -28,7 +28,8 @@ contract OperationTest is Setup {
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
         // Earn Interest
-        skip(1 minutes);
+        uint256[] memory maturities = strategy.getTargetMaturities();
+        changeMarketPrice(strategy, maturities[0]);
 
         // Report profit
         vm.prank(keeper);
@@ -66,7 +67,8 @@ contract OperationTest is Setup {
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
         // Earn Interest
-        skip(1 minutes);
+        uint256[] memory maturities = strategy.getTargetMaturities();
+        changeMarketPrice(strategy, maturities[0]);
 
         // TODO: implement logic to simulate earning interest.
         uint256 toAirdrop = (_amount * _profitFactor) / MAX_BPS;
@@ -114,7 +116,8 @@ contract OperationTest is Setup {
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
         // Earn Interest
-        skip(1 minutes);
+        uint256[] memory maturities = strategy.getTargetMaturities();
+        changeMarketPrice(strategy, maturities[0]);
 
         // TODO: implement logic to simulate earning interest.
         uint256 toAirdrop = (_amount * _profitFactor) / MAX_BPS;
@@ -179,8 +182,8 @@ contract OperationTest is Setup {
         assertTrue(!trigger);
 
         // Skip some time
-
-        skip(1 minutes);
+        uint256[] memory maturities = strategy.getTargetMaturities();
+        changeMarketPrice(strategy, maturities[0]);
 
         (trigger, ) = strategy.tendTrigger();
         assertTrue(!trigger);

@@ -130,6 +130,9 @@ interface ILendingMarket {
     function isOpened(uint8 orderBookId) external view returns (bool);
     function isPreOrderPeriod(uint8 orderBookId) external view returns (bool);
     function isItayosePeriod(uint8 orderBookId) external view returns (bool);
+    function getBestBorrowUnitPrice(
+        uint8 orderBookId
+    ) external view returns (uint256 unitPrice);
     function getMarketUnitPrice(
         uint8 orderBookId
     ) external view returns (uint256);

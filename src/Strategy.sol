@@ -2,6 +2,7 @@
 pragma solidity ^0.8.18;
 
 import {BaseStrategy, ERC20} from "@tokenized-strategy/BaseStrategy.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ILendingMarketController, ILendingMarket, ITokenVault, ProtocolTypes, GetOrderEstimationFromFVParams} from "./interfaces/ISecuredFinance.sol";
 
@@ -20,6 +21,7 @@ import {ILendingMarketController, ILendingMarket, ITokenVault, ProtocolTypes, Ge
 
 contract Strategy is BaseStrategy {
     using SafeERC20 for ERC20;
+    using Math for uint256;
 
     ILendingMarketController public immutable lendingMarketController;
     ITokenVault public immutable tokenVault;
@@ -27,6 +29,8 @@ contract Strategy is BaseStrategy {
     ILendingMarket public immutable lendingMarket;
     // Minimum amount for triggering the tend function
     uint256 public immutable minTendAmount;
+    uint256 public immutable maxMaturities;
+    uint256[] public allocationRatios;
 
     uint256 private constant SECONDS_PER_YEAR = 365 days;
     uint256 private constant BASIS_POINTS = 10000;
@@ -47,8 +51,15 @@ contract Strategy is BaseStrategy {
         address _lendingMarketController,
         address _tokenVault,
         bytes32 _currency,
-        uint256 _minTendAmount
+        uint256 _minTendAmount,
+        uint256 _maxMaturities,
+        uint256[] memory _allocationRatios
     ) BaseStrategy(_asset, _name) {
+        // Validate inputs
+        require(_lendingMarketController != address(0), "lmc=0");
+        require(_tokenVault != address(0), "vault=0");
+        require(_currency != bytes32(0), "currency=0");
+
         lendingMarketController = ILendingMarketController(
             _lendingMarketController
         );
@@ -73,6 +84,23 @@ contract Strategy is BaseStrategy {
         currency = _currency;
         minTendAmount = _minTendAmount;
         maturityExclusionPeriod = 1 weeks;
+
+        // Validate allocation parameters
+        require(_maxMaturities > 0, "maxMaturities must > 0");
+        require(
+            _allocationRatios.length == _maxMaturities,
+            "ratio length mismatch"
+        );
+
+        uint256 totalRatio = 0;
+        for (uint256 i = 0; i < _allocationRatios.length; i++) {
+            require(_allocationRatios[i] > 0, "ratio must > 0");
+            totalRatio += _allocationRatios[i];
+        }
+        require(totalRatio > 0, "total ratio must > 0");
+
+        maxMaturities = _maxMaturities;
+        allocationRatios = _allocationRatios;
     }
 
     function setMaturityExclusionPeriod(
@@ -108,32 +136,18 @@ contract Strategy is BaseStrategy {
             currency
         );
 
-        (
-            OrderBook memory firstOrderBooks,
-            OrderBook memory secondOrderBook
-        ) = _getTargetOrderBooks();
+        OrderBook[] memory targetOrderBooks = _getTargetOrderBooks();
 
-        if (firstOrderBooks.id == 0) return; // No available maturities
+        if (targetOrderBooks.length == 0) return; // No available maturities
 
-        uint256 firstAmount;
-        uint256 secondAmount;
+        uint256[] memory amounts = _calculateAllocationAmounts(
+            depositAmount,
+            targetOrderBooks.length
+        );
 
-        if (depositAmount > 0) {
-            if (secondOrderBook.id == 0) {
-                // Only use first maturity if no first maturity
-                firstAmount = depositAmount;
-            } else {
-                // Split 40% to first, 60% to second
-                firstAmount = (depositAmount * 4) / 10;
-                secondAmount = depositAmount - firstAmount;
-            }
-        }
-
-        // Always call rebalancing for both maturities (even with 0 new amount)
-        _deployToMaturityWithRebalance(firstOrderBooks, firstAmount);
-
-        if (secondOrderBook.id != 0) {
-            _deployToMaturityWithRebalance(secondOrderBook, secondAmount);
+        // Deploy to each maturity with calculated allocation
+        for (uint256 i = 0; i < targetOrderBooks.length; i++) {
+            _deployToMaturity(targetOrderBooks[i], amounts[i]);
         }
     }
 
@@ -316,8 +330,7 @@ contract Strategy is BaseStrategy {
             asset.balanceOf(address(this)) +
             tokenVault.getDepositAmount(address(this), currency);
 
-        OrderBook[2] memory orderBooks;
-        (orderBooks[0], orderBooks[1]) = _getTargetOrderBooks();
+        OrderBook[] memory orderBooks = _getTargetOrderBooks();
 
         for (uint256 i = 0; i < orderBooks.length; i++) {
             OrderBook memory orderBook = orderBooks[i];
@@ -364,7 +377,7 @@ contract Strategy is BaseStrategy {
 
             // Get order fee amount
             uint256 orderFeeRate = lendingMarket.getOrderFeeRate();
-            uint256 extraOrderFeeAmount = calculateOrderFeeAmount(
+            uint256 extraOrderFeeAmount = _calculateOrderFeeAmount(
                 orderBook.maturity,
                 totalExistingAmount,
                 orderFeeRate
@@ -434,9 +447,7 @@ contract Strategy is BaseStrategy {
         }
 
         // Check if there are orders that need rebalancing
-        OrderBook[2] memory orderBooks;
-        // Get target order books for rebalancing
-        (orderBooks[0], orderBooks[1]) = _getTargetOrderBooks();
+        OrderBook[] memory orderBooks = _getTargetOrderBooks();
 
         for (uint256 i = 0; i < orderBooks.length; i++) {
             OrderBook memory orderBook = orderBooks[i];
@@ -502,8 +513,48 @@ contract Strategy is BaseStrategy {
     }
 
     /*//////////////////////////////////////////////////////////////
+                        EXTERNAL FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    function getTargetMaturities() external view returns (uint256[] memory) {
+        OrderBook[] memory targetOrderBooks = _getTargetOrderBooks();
+        uint256[] memory maturities = new uint256[](targetOrderBooks.length);
+
+        for (uint256 i = 0; i < targetOrderBooks.length; i++) {
+            maturities[i] = targetOrderBooks[i].maturity;
+        }
+
+        return maturities;
+    }
+
+    /*//////////////////////////////////////////////////////////////
                         HELPER FUNCTIONS
     //////////////////////////////////////////////////////////////*/
+
+    function _calculateAllocationAmounts(
+        uint256 totalAmount,
+        uint256 availableMaturities
+    ) internal view returns (uint256[] memory amounts) {
+        uint256 maturityCount = availableMaturities > maxMaturities
+            ? maxMaturities
+            : availableMaturities;
+        amounts = new uint256[](maturityCount);
+
+        if (totalAmount == 0) return amounts;
+
+        uint256 totalRatio = 0;
+        for (uint256 i = 0; i < maturityCount; i++) {
+            totalRatio += allocationRatios[i];
+        }
+
+        uint256 allocatedAmount = 0;
+        for (uint256 i = 0; i < maturityCount - 1; i++) {
+            amounts[i] = (totalAmount * allocationRatios[i]) / totalRatio;
+            allocatedAmount += amounts[i];
+        }
+        // Last amount gets the remaining to avoid rounding errors
+        amounts[maturityCount - 1] = totalAmount - allocatedAmount;
+    }
 
     function _getOrderBookId(
         uint256 maturity
@@ -518,17 +569,20 @@ contract Strategy is BaseStrategy {
     function _getTargetOrderBooks()
         internal
         view
-        returns (
-            OrderBook memory firstOrderBook,
-            OrderBook memory secondOrderBook
-        )
+        returns (OrderBook[] memory targetOrderBooks)
     {
         uint256[] memory maturities = lendingMarketController.getMaturities(
             currency
         );
 
+        targetOrderBooks = new OrderBook[](maxMaturities);
         uint256 validCount = 0;
-        for (uint256 i = 0; i < maturities.length; i++) {
+
+        for (
+            uint256 i = 0;
+            i < maturities.length && validCount < maxMaturities;
+            i++
+        ) {
             uint8 orderBookId = _getOrderBookId(maturities[i]);
             OrderBook memory orderBook = OrderBook({
                 id: orderBookId,
@@ -536,14 +590,14 @@ contract Strategy is BaseStrategy {
             });
 
             if (_isValidMaturity(orderBook)) {
-                if (validCount == 0) {
-                    firstOrderBook = orderBook;
-                } else if (validCount == 1) {
-                    secondOrderBook = orderBook;
-                    break;
-                }
+                targetOrderBooks[validCount] = orderBook;
                 validCount++;
             }
+        }
+
+        // Resize array to actual valid count
+        assembly {
+            mstore(targetOrderBooks, validCount)
         }
     }
 
@@ -616,7 +670,7 @@ contract Strategy is BaseStrategy {
         if (maturity <= block.timestamp) return BASIS_POINTS;
 
         uint256 timeToMaturity = maturity - block.timestamp;
-        uint256 rate = ((apr * timeToMaturity) / SECONDS_PER_YEAR) +
+        uint256 rate = ((apr * timeToMaturity).ceilDiv(SECONDS_PER_YEAR)) +
             BASIS_POINTS;
 
         // Ensure rate is greater than BASIS_POINTS to prevent unitPrice > BASIS_POINTS
@@ -645,7 +699,7 @@ contract Strategy is BaseStrategy {
         require(success, "Order execution failed");
     }
 
-    function _deployToMaturityWithRebalance(
+    function _deployToMaturity(
         OrderBook memory orderBook,
         uint256 newAmount
     ) internal {
@@ -655,24 +709,11 @@ contract Strategy is BaseStrategy {
             return; // Nothing to do
         }
 
-        uint256 existingAmount = 0;
-
-        // Check if rebalancing is needed for existing orders
-        // if (_needsRebalancing(orderBook, orderIds)) {
-        // Cancel existing orders and get the freed amount
-        existingAmount = _cancelOrdersByIds(orderBook.id, orderIds);
-        // }
-
-        // Combine new funds with rebalanced funds
+        // Combine new funds with freed amount from cancelled orders
+        uint256 existingAmount = _cancelOrdersByIds(orderBook.id, orderIds);
         uint256 totalAmount = newAmount + existingAmount;
 
-        if (totalAmount > 0) {
-            _createOrders(
-                orderBook,
-                totalAmount,
-                existingAmount > 0 ? new uint48[](0) : orderIds
-            );
-        }
+        _createOrders(orderBook, totalAmount);
     }
 
     function _getActiveOrderIds(
@@ -708,25 +749,25 @@ contract Strategy is BaseStrategy {
         uint256 marketPrice = lendingMarket.getMarketUnitPrice(orderBook.id);
         uint256 marketAPR = _unitPriceToAPR(marketPrice, orderBook.maturity);
 
-        // Find the lowest price among our orders
-        uint256 hightestPrice = 0;
+        // Find the highest price among our orders
+        uint256 highestPrice = 0;
         for (uint256 i = 0; i < orderIds.length; i++) {
             (, uint256 unitPrice, , , uint256 amount, , ) = lendingMarket
                 .getOrder(orderBook.id, orderIds[i]);
-            if (amount > 0 && unitPrice > hightestPrice) {
-                hightestPrice = unitPrice;
+            if (amount > 0 && unitPrice > highestPrice) {
+                highestPrice = unitPrice;
             }
         }
 
-        if (hightestPrice == 0) {
+        if (highestPrice == 0) {
             return false;
         }
 
-        if (marketPrice >= hightestPrice && hightestPrice >= MAX_PRICE) {
+        if (marketPrice >= highestPrice && highestPrice >= MAX_PRICE) {
             return false;
         }
 
-        uint256 lowestAPR = _unitPriceToAPR(hightestPrice, orderBook.maturity);
+        uint256 lowestAPR = _unitPriceToAPR(highestPrice, orderBook.maturity);
 
         // Rebalance if the difference in abs is more than 0.25%
         return
@@ -752,8 +793,7 @@ contract Strategy is BaseStrategy {
 
     function _createOrders(
         OrderBook memory orderBook,
-        uint256 totalAmount,
-        uint48[] memory existingOrderIds
+        uint256 totalAmount
     ) internal {
         if (totalAmount == 0) return;
 
@@ -766,10 +806,7 @@ contract Strategy is BaseStrategy {
 
         // Create orders only if we don't already have orders at these exact prices
         for (uint256 i = 0; i < 3; i++) {
-            if (
-                amounts[i] > 0 &&
-                !_hasOrderAtPrice(orderBook, unitPrices[i], existingOrderIds)
-            ) {
+            if (amounts[i] > 0) {
                 _createSingleOrder(
                     orderBook.maturity,
                     amounts[i],
@@ -848,8 +885,6 @@ contract Strategy is BaseStrategy {
             address(this)
         );
 
-        // require(presentValue >= 0, "Borrowing position not allowed");
-
         return (uint256(presentValue));
     }
 
@@ -862,16 +897,14 @@ contract Strategy is BaseStrategy {
             address(this)
         );
 
-        // require(futureValue >= 0, "Borrowing position not allowed");
-
         return uint256(futureValue);
     }
 
-    function calculateOrderFeeAmount(
+    function _calculateOrderFeeAmount(
         uint256 _maturity,
         uint256 _amount,
         uint256 _orderFeeRate
-    ) public view returns (uint256 orderFeeAmount) {
+    ) internal view returns (uint256 orderFeeAmount) {
         if (block.timestamp >= _maturity) return 0;
 
         uint256 duration = _maturity - block.timestamp;

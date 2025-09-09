@@ -39,7 +39,9 @@ contract StrategyFactory {
         address _lendingMarketController,
         address _tokenVault,
         bytes32 _currency,
-        uint256 _minTendAmount
+        uint256 _minTendAmount,
+        uint256 _maxMaturities,
+        uint256[] calldata _allocationRatios
     ) external virtual returns (address) {
         // tokenized strategies available setters.
         IStrategyInterface _newStrategy = IStrategyInterface(
@@ -50,7 +52,9 @@ contract StrategyFactory {
                     _lendingMarketController,
                     _tokenVault,
                     _currency,
-                    _minTendAmount
+                    _minTendAmount,
+                    _maxMaturities,
+                    _allocationRatios
                 )
             )
         );

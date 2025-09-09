@@ -7,6 +7,7 @@ import {Test} from "forge-std/Test.sol";
 import {ERC20} from "../../Strategy.sol";
 import {StrategyFactory} from "../../StrategyFactory.sol";
 import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
+import {ILendingMarket, ILendingMarketController, ITokenVault, ProtocolTypes} from "../../interfaces/ISecuredFinance.sol";
 
 // Inherit the events so they can be checked if desired.
 import {IEvents} from "@tokenized-strategy/interfaces/IEvents.sol";
@@ -83,6 +84,10 @@ contract Setup is Test, IEvents {
 
     function setUpStrategy() public returns (address) {
         // we save the strategy as a IStrategyInterface to give it the needed interface
+        uint256[] memory allocationRatios = new uint256[](2);
+        allocationRatios[0] = 4; // 40%
+        allocationRatios[1] = 6; // 60%
+
         IStrategyInterface _strategy = IStrategyInterface(
             address(
                 strategyFactory.newStrategy(
@@ -91,7 +96,9 @@ contract Setup is Test, IEvents {
                     contractAddrs["LendingMarketController"],
                     contractAddrs["TokenVault"],
                     "USDC",
-                    1e6 // 1 USDC
+                    1e6, // 1 USDC
+                    2, // maxMaturities
+                    allocationRatios
                 )
             )
         );
@@ -164,6 +171,50 @@ contract Setup is Test, IEvents {
         strategy.setPerformanceFee(_performanceFee);
     }
 
+    function changeMarketPrice(
+        IStrategyInterface _strategy,
+        uint256 _maturity
+    ) public {
+        ILendingMarketController lendingMarketController = ILendingMarketController(
+                contractAddrs["LendingMarketController"]
+            );
+        ITokenVault tokenVault = ITokenVault(contractAddrs["TokenVault"]);
+
+        bytes32 currency = _strategy.currency();
+        uint256 amount = 1e9; // 1,000 USDC
+        uint256 newUnitPrice = _getNewUnitPrice(
+            lendingMarketController,
+            currency,
+            _maturity
+        );
+
+        // Deposit
+        vm.prank(management);
+        asset.approve(address(tokenVault), amount * 2);
+        vm.prank(management);
+        tokenVault.deposit(currency, amount * 2);
+
+        // Place a lend order
+        vm.prank(management);
+        lendingMarketController.executeOrder(
+            currency,
+            _maturity,
+            ProtocolTypes.Side.Lend,
+            amount,
+            newUnitPrice
+        );
+
+        // Fill the order
+        vm.prank(management);
+        lendingMarketController.executeOrder(
+            currency,
+            _maturity,
+            ProtocolTypes.Side.Borrow,
+            amount,
+            0
+        );
+    }
+
     function _setTokenAddrs() internal {
         tokenAddrs["WBTC"] = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
         tokenAddrs["YFI"] = 0x0bc529c00C6401aEF6D220BE8C6Ea1667F6Ad93e;
@@ -181,5 +232,31 @@ contract Setup is Test, IEvents {
         contractAddrs[
             "TokenVault"
         ] = 0xB74749b2213916b1dA3b869E41c7c57f1db69393;
+    }
+
+    function _getNewUnitPrice(
+        ILendingMarketController lendingMarketController,
+        bytes32 _currency,
+        uint256 _maturity
+    ) internal view returns (uint256) {
+        ILendingMarket lendingMarket = ILendingMarket(
+            lendingMarketController.getLendingMarket(_currency)
+        );
+
+        uint8 orderBookId = lendingMarketController.getOrderBookId(
+            _currency,
+            _maturity
+        );
+        uint256 marketUnitPrice = lendingMarket.getMarketUnitPrice(orderBookId);
+        uint256 bestBorrowUnitPrice = lendingMarket.getBestBorrowUnitPrice(
+            orderBookId
+        );
+
+        return
+            (
+                bestBorrowUnitPrice > marketUnitPrice
+                    ? bestBorrowUnitPrice
+                    : marketUnitPrice
+            ) + 1;
     }
 }
