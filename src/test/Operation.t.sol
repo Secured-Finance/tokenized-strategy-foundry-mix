@@ -2,6 +2,7 @@
 pragma solidity ^0.8.18;
 
 import "forge-std/console2.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Setup} from "./utils/Setup.sol";
 
 contract OperationTest is Setup {
@@ -22,14 +23,20 @@ contract OperationTest is Setup {
     function test_operation(uint256 _amount) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
 
+        // Calculate max loss expected
+        uint256[] memory maturities = strategy.getTargetMaturities();
+        uint256 maxLossExpected = 0;
+        for (uint256 i = 0; i < maturities.length; i++) {
+            maxLossExpected += calculateMaxLossExpected(maturities[i], _amount);
+        }
+
         // Deposit into strategy
         mintAndDepositIntoStrategy(strategy, user, _amount);
 
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
         // Earn Interest
-        uint256[] memory maturities = strategy.getTargetMaturities();
-        changeMarketPrice(strategy, maturities[0]);
+        changeMarketPrice(maturities[0], 1);
 
         // Report profit
         vm.prank(keeper);
@@ -37,19 +44,25 @@ contract OperationTest is Setup {
 
         // Check return Values
         assertGe(profit, 0, "!profit");
-        assertEq(loss, 0, "!loss");
+        assertLe(loss, maxLossExpected, "!loss");
 
         skip(strategy.profitMaxUnlockTime());
 
         uint256 balanceBefore = asset.balanceOf(user);
 
         // Withdraw all funds
+        uint256 availableWithdrawLimit = strategy.availableWithdrawLimit(user);
+        uint256 withdrawableAmount = Math.min(
+            strategy.convertToAssets(strategy.balanceOf(user)),
+            availableWithdrawLimit
+        );
+
         vm.prank(user);
-        strategy.redeem(_amount, user, user);
+        strategy.withdraw(withdrawableAmount, user, user);
 
         assertGe(
             asset.balanceOf(user),
-            balanceBefore + _amount,
+            balanceBefore + withdrawableAmount,
             "!final balance"
         );
     }
@@ -60,18 +73,36 @@ contract OperationTest is Setup {
     ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
         _profitFactor = uint16(bound(uint256(_profitFactor), 10, MAX_BPS));
+        uint256 toAirdrop = (_amount * _profitFactor) / MAX_BPS;
+
+        // Calculate max loss expected
+        uint256[] memory maturities = strategy.getTargetMaturities();
+        uint256 maxDepositLossExpected = 0;
+        uint256 maxAirdropLossExpected = 0;
+        for (uint256 i = 0; i < maturities.length; i++) {
+            maxDepositLossExpected += calculateMaxLossExpected(
+                maturities[i],
+                _amount
+            );
+            maxAirdropLossExpected += calculateMaxLossExpected(
+                maturities[i],
+                toAirdrop
+            );
+        }
 
         // Deposit into strategy
         mintAndDepositIntoStrategy(strategy, user, _amount);
 
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
+        // Report profit
+        vm.prank(keeper);
+        (, uint256 loss1) = strategy.report();
+
         // Earn Interest
-        uint256[] memory maturities = strategy.getTargetMaturities();
-        changeMarketPrice(strategy, maturities[0]);
+        changeMarketPrice(maturities[0], 1);
 
         // TODO: implement logic to simulate earning interest.
-        uint256 toAirdrop = (_amount * _profitFactor) / MAX_BPS;
         airdrop(asset, address(strategy), toAirdrop);
 
         vm.prank(keeper);
@@ -79,23 +110,33 @@ contract OperationTest is Setup {
 
         // Report profit
         vm.prank(keeper);
-        (uint256 profit, uint256 loss) = strategy.report();
+        (uint256 profit2, uint256 loss2) = strategy.report();
 
         // Check return Values
-        assertGe(profit, toAirdrop, "!profit");
-        assertEq(loss, 0, "!loss");
+        assertLe(
+            toAirdrop,
+            profit2 + maxAirdropLossExpected + loss1,
+            "!profit"
+        );
+        assertEq(loss2, 0, "!loss");
 
         skip(strategy.profitMaxUnlockTime());
 
         uint256 balanceBefore = asset.balanceOf(user);
 
         // Withdraw all funds
+        uint256 availableWithdrawLimit = strategy.availableWithdrawLimit(user);
+        uint256 withdrawableAmount = Math.min(
+            strategy.convertToAssets(strategy.balanceOf(user)),
+            availableWithdrawLimit
+        );
+
         vm.prank(user);
-        strategy.redeem(_amount, user, user);
+        strategy.withdraw(withdrawableAmount, user, user);
 
         assertGe(
             asset.balanceOf(user),
-            balanceBefore + _amount,
+            balanceBefore + withdrawableAmount,
             "!final balance"
         );
     }
@@ -106,21 +147,39 @@ contract OperationTest is Setup {
     ) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
         _profitFactor = uint16(bound(uint256(_profitFactor), 10, MAX_BPS));
+        uint256 toAirdrop = (_amount * _profitFactor) / MAX_BPS;
 
         // Set protocol fee to 0 and perf fee to 10%
         setFees(0, 1_000);
+
+        // Calculate max loss expected
+        uint256[] memory maturities = strategy.getTargetMaturities();
+        uint256 maxDepositLossExpected = 0;
+        uint256 maxAirdropLossExpected = 0;
+        for (uint256 i = 0; i < maturities.length; i++) {
+            maxDepositLossExpected += calculateMaxLossExpected(
+                maturities[i],
+                _amount
+            );
+            maxAirdropLossExpected += calculateMaxLossExpected(
+                maturities[i],
+                toAirdrop
+            );
+        }
 
         // Deposit into strategy
         mintAndDepositIntoStrategy(strategy, user, _amount);
 
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
+        // Report profit
+        vm.prank(keeper);
+        (, uint256 loss1) = strategy.report();
+
         // Earn Interest
-        uint256[] memory maturities = strategy.getTargetMaturities();
-        changeMarketPrice(strategy, maturities[0]);
+        changeMarketPrice(maturities[0], 1);
 
         // TODO: implement logic to simulate earning interest.
-        uint256 toAirdrop = (_amount * _profitFactor) / MAX_BPS;
         airdrop(asset, address(strategy), toAirdrop);
 
         vm.prank(keeper);
@@ -128,39 +187,73 @@ contract OperationTest is Setup {
 
         // Report profit
         vm.prank(keeper);
-        (uint256 profit, uint256 loss) = strategy.report();
+        (uint256 profit2, uint256 loss2) = strategy.report();
 
         // Check return Values
-        assertGe(profit, toAirdrop, "!profit");
-        assertEq(loss, 0, "!loss");
+        assertLe(
+            toAirdrop,
+            profit2 + maxAirdropLossExpected + loss1,
+            "!profit"
+        );
+        assertEq(loss2, 0, "!loss");
 
         skip(strategy.profitMaxUnlockTime());
 
         // Get the expected fee
-        uint256 expectedShares = (profit * 1_000) / MAX_BPS;
+        uint256 expectedShares = (profit2 * 1_000) / MAX_BPS;
 
         assertEq(strategy.balanceOf(performanceFeeRecipient), expectedShares);
 
-        uint256 balanceBefore = asset.balanceOf(user);
+        // Place lend orders for unwinding
+        for (uint256 i = 0; i < maturities.length; i++) {
+            placeLendOrderAtMarketUnitPrice(maturities[i], _amount);
+        }
 
         // Withdraw all funds
-        vm.prank(user);
-        strategy.redeem(_amount, user, user);
+        {
+            uint256 balanceBefore = asset.balanceOf(user);
+            // Withdraw all funds
+            uint256 availableWithdrawLimit = strategy.availableWithdrawLimit(
+                user
+            );
+            uint256 withdrawableAmount = Math.min(
+                strategy.convertToAssets(strategy.balanceOf(user)),
+                availableWithdrawLimit
+            );
 
-        assertGe(
-            asset.balanceOf(user),
-            balanceBefore + _amount,
-            "!final balance"
-        );
+            vm.prank(user);
+            strategy.withdraw(withdrawableAmount, user, user);
 
-        vm.prank(performanceFeeRecipient);
-        strategy.redeem(
-            expectedShares,
-            performanceFeeRecipient,
-            performanceFeeRecipient
-        );
+            assertGe(
+                asset.balanceOf(user),
+                balanceBefore + withdrawableAmount,
+                "!final balance"
+            );
+        }
 
-        checkStrategyTotals(strategy, 0, 0, 0);
+        // Withdraw performance fee
+        {
+            uint256 availableWithdrawLimit = strategy.availableWithdrawLimit(
+                performanceFeeRecipient
+            );
+            uint256 withdrawableAmount = Math.min(
+                strategy.convertToAssets(
+                    strategy.balanceOf(performanceFeeRecipient)
+                ),
+                availableWithdrawLimit
+            );
+
+            if (withdrawableAmount > 0) {
+                vm.prank(performanceFeeRecipient);
+                strategy.withdraw(
+                    withdrawableAmount,
+                    performanceFeeRecipient,
+                    performanceFeeRecipient
+                );
+            }
+        }
+
+        checkStrategyTotals(0, 0, 0);
 
         assertGe(
             asset.balanceOf(performanceFeeRecipient),
@@ -182,8 +275,7 @@ contract OperationTest is Setup {
         assertTrue(!trigger);
 
         // Skip some time
-        uint256[] memory maturities = strategy.getTargetMaturities();
-        changeMarketPrice(strategy, maturities[0]);
+        skip(10 minutes);
 
         (trigger, ) = strategy.tendTrigger();
         assertTrue(!trigger);
@@ -200,8 +292,24 @@ contract OperationTest is Setup {
         (trigger, ) = strategy.tendTrigger();
         assertTrue(!trigger);
 
+        uint256[] memory maturities = strategy.getTargetMaturities();
+
+        // Place lend orders for unwinding
+        for (uint256 i = 0; i < maturities.length; i++) {
+            placeLendOrderAtMarketUnitPrice(maturities[i], _amount);
+        }
+
+        uint256 availableWithdrawLimit = strategy.availableWithdrawLimit(user);
+        uint256 withdrawableAmount = Math.min(
+            strategy.convertToAssets(strategy.balanceOf(user)),
+            availableWithdrawLimit
+        );
+
         vm.prank(user);
-        strategy.redeem(_amount, user, user);
+        strategy.withdraw(withdrawableAmount, user, user);
+
+        vm.prank(keeper);
+        strategy.tend();
 
         (trigger, ) = strategy.tendTrigger();
         assertTrue(!trigger);

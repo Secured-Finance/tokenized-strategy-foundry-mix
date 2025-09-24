@@ -25,20 +25,20 @@ contract Strategy is BaseStrategy {
 
     ILendingMarketController public immutable lendingMarketController;
     ITokenVault public immutable tokenVault;
-    bytes32 public immutable currency;
     ILendingMarket public immutable lendingMarket;
-    // Minimum amount for triggering the tend function
-    uint256 public immutable minTendAmount;
+
+    bytes32 public immutable currency;
+    uint256 public immutable minTendAmount; // Minimum amount for triggering the tend function
+    uint256 public immutable minAPR; // Minimum order APR in basis points
     uint256 public immutable maxMaturities;
-    uint256[] public allocationRatios;
 
     uint256 private constant SECONDS_PER_YEAR = 365 days;
-    uint256 private constant BASIS_POINTS = 10000;
-    uint256 private constant MIN_APR = 700; // 7% in basis points
-    uint256 private constant MAX_PRICE = 9975;
+    uint256 public constant BASIS_POINTS = 10000;
+    uint256 public constant MAX_ORDERS = 3;
 
     uint256 public maturityExclusionPeriod;
     mapping(uint256 => uint256) public lastMarketUnitPrices; // Mapping to store last market unit prices for each maturity
+    uint256[] public allocationRatios;
 
     struct OrderBook {
         uint8 id;
@@ -52,7 +52,7 @@ contract Strategy is BaseStrategy {
         address _tokenVault,
         bytes32 _currency,
         uint256 _minTendAmount,
-        uint256 _maxMaturities,
+        uint256 _minAPR,
         uint256[] memory _allocationRatios
     ) BaseStrategy(_asset, _name) {
         // Validate inputs
@@ -71,9 +71,7 @@ contract Strategy is BaseStrategy {
         );
 
         lendingMarket = ILendingMarket(
-            ILendingMarketController(_lendingMarketController).getLendingMarket(
-                _currency
-            )
+            lendingMarketController.getLendingMarket(_currency)
         );
 
         require(
@@ -86,11 +84,7 @@ contract Strategy is BaseStrategy {
         maturityExclusionPeriod = 1 weeks;
 
         // Validate allocation parameters
-        require(_maxMaturities > 0, "maxMaturities must > 0");
-        require(
-            _allocationRatios.length == _maxMaturities,
-            "ratio length mismatch"
-        );
+        require(_minAPR > 0, "minAPR must > 0");
 
         uint256 totalRatio = 0;
         for (uint256 i = 0; i < _allocationRatios.length; i++) {
@@ -99,7 +93,8 @@ contract Strategy is BaseStrategy {
         }
         require(totalRatio > 0, "total ratio must > 0");
 
-        maxMaturities = _maxMaturities;
+        minAPR = _minAPR;
+        maxMaturities = _allocationRatios.length;
         allocationRatios = _allocationRatios;
     }
 
@@ -176,6 +171,7 @@ contract Strategy is BaseStrategy {
         if (_amount == 0) return;
 
         uint256 freed = tokenVault.getDepositAmount(address(this), currency);
+        uint256 profit = 0;
         uint256 loss = 0;
         OrderBook[] memory orderBooks = _getOrderBooks();
 
@@ -213,30 +209,34 @@ contract Strategy is BaseStrategy {
                 (
                     uint256 filledAmount,
                     uint256 filledAmountInFV,
-
+                    uint256 feeInFV
                 ) = lendingMarketController.unwindPositionWithCap(
                         currency,
                         orderBook.maturity,
                         remainingAmountInFV
                     );
 
-                uint256 freedAmount = (filledAmountInFV * remainingAmount) /
-                    remainingAmountInFV;
+                uint256 freedAmount = ((filledAmountInFV + feeInFV) *
+                    remainingAmount) / remainingAmountInFV;
 
-                loss += freedAmount - filledAmount;
+                if (freedAmount > filledAmount) {
+                    loss += freedAmount - filledAmount;
+                } else {
+                    profit += filledAmount - freedAmount;
+                }
                 freed += freedAmount;
 
                 // If we have freed enough, break
-                if (freed >= _amount + loss) {
+                if (freed >= _amount) {
                     break;
                 }
             }
         }
 
-        require(freed >= _amount + loss, "Not enough funds freed");
+        require(freed >= _amount, "Not enough funds freed");
 
         // Withdraw the freed funds from TokenVault
-        tokenVault.withdraw(currency, freed - loss);
+        tokenVault.withdraw(currency, freed + profit - loss);
     }
 
     /**
@@ -377,11 +377,13 @@ contract Strategy is BaseStrategy {
 
             // Get order fee amount
             uint256 orderFeeRate = lendingMarket.getOrderFeeRate();
-            uint256 extraOrderFeeAmount = _calculateOrderFeeAmount(
-                orderBook.maturity,
-                totalExistingAmount,
-                orderFeeRate
-            );
+            uint256 extraOrderFeeAmount = filledAmount > totalExistingAmount
+                ? _calculateOrderFeeAmount(
+                    orderBook.maturity,
+                    filledAmount - totalExistingAmount,
+                    orderFeeRate
+                )
+                : 0;
 
             // In an actual withdraw, the placed orders will be cancelled before unwinding
             // and the funds will be returned to TokenVault.
@@ -636,19 +638,17 @@ contract Strategy is BaseStrategy {
 
     function _calculateOrderPrices(
         OrderBook memory orderBook
-    ) internal view returns (uint256[3] memory prices) {
+    ) internal view returns (uint256[MAX_ORDERS] memory prices) {
         uint256 marketPrice = lendingMarket.getMarketUnitPrice(orderBook.id);
         uint256 marketAPR = _unitPriceToAPR(marketPrice, orderBook.maturity);
 
-        // Price 1: Market price or 7% minimum
-        uint256 baseAPR = marketAPR < MIN_APR ? MIN_APR : marketAPR;
-        prices[0] = _aprToUnitPrice(baseAPR, orderBook.maturity);
-
-        // Price 2: Base APR + 0.05%
-        prices[1] = _aprToUnitPrice(baseAPR + 5, orderBook.maturity);
-
-        // Price 3: Base APR + 0.1%
-        prices[2] = _aprToUnitPrice(baseAPR + 10, orderBook.maturity);
+        uint256 baseAPR = marketAPR < minAPR ? minAPR : marketAPR;
+        for (uint256 index = 0; index < MAX_ORDERS; index++) {
+            prices[index] = _aprToUnitPrice(
+                baseAPR + (index * 5),
+                orderBook.maturity
+            );
+        }
     }
 
     function _unitPriceToAPR(
@@ -746,34 +746,27 @@ contract Strategy is BaseStrategy {
     ) internal view returns (bool) {
         if (orderIds.length == 0) return false;
 
-        uint256 marketPrice = lendingMarket.getMarketUnitPrice(orderBook.id);
-        uint256 marketAPR = _unitPriceToAPR(marketPrice, orderBook.maturity);
+        uint256[MAX_ORDERS] memory unitPrices = _calculateOrderPrices(
+            orderBook
+        );
 
-        // Find the highest price among our orders
-        uint256 highestPrice = 0;
         for (uint256 i = 0; i < orderIds.length; i++) {
-            (, uint256 unitPrice, , , uint256 amount, , ) = lendingMarket
-                .getOrder(orderBook.id, orderIds[i]);
-            if (amount > 0 && unitPrice > highestPrice) {
-                highestPrice = unitPrice;
+            (, uint256 unitPrice, , , , , ) = lendingMarket.getOrder(
+                orderBook.id,
+                orderIds[i]
+            );
+            uint256 orderAPR = _unitPriceToAPR(unitPrice, orderBook.maturity);
+            uint256 baseAPR = _unitPriceToAPR(
+                unitPrices[MAX_ORDERS - orderIds.length + i],
+                orderBook.maturity
+            );
+
+            if (baseAPR >= orderAPR + 25 || baseAPR + 25 <= orderAPR) {
+                return true;
             }
         }
 
-        if (highestPrice == 0) {
-            return false;
-        }
-
-        if (marketPrice >= highestPrice && highestPrice >= MAX_PRICE) {
-            return false;
-        }
-
-        uint256 lowestAPR = _unitPriceToAPR(highestPrice, orderBook.maturity);
-
-        // Rebalance if the difference in abs is more than 0.25%
-        return
-            lowestAPR > marketAPR
-                ? (lowestAPR - marketAPR > 25)
-                : (marketAPR - lowestAPR > 25);
+        return false;
     }
 
     function _hasOrderAtPrice(
@@ -797,15 +790,17 @@ contract Strategy is BaseStrategy {
     ) internal {
         if (totalAmount == 0) return;
 
-        uint256[3] memory amounts;
+        uint256[MAX_ORDERS] memory amounts;
         amounts[0] = (totalAmount * 40) / 100; // 40%
         amounts[1] = (totalAmount * 30) / 100; // 30%
         amounts[2] = totalAmount - amounts[0] - amounts[1]; // Remaining amount to avoid rounding errors
 
-        uint256[3] memory unitPrices = _calculateOrderPrices(orderBook);
+        uint256[MAX_ORDERS] memory unitPrices = _calculateOrderPrices(
+            orderBook
+        );
 
         // Create orders only if we don't already have orders at these exact prices
-        for (uint256 i = 0; i < 3; i++) {
+        for (uint256 i = 0; i < MAX_ORDERS; i++) {
             if (amounts[i] > 0) {
                 _createSingleOrder(
                     orderBook.maturity,
@@ -896,6 +891,8 @@ contract Strategy is BaseStrategy {
             maturity,
             address(this)
         );
+
+        require(futureValue >= 0, "Invalid future value");
 
         return uint256(futureValue);
     }

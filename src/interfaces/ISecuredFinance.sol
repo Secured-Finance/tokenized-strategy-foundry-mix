@@ -75,6 +75,14 @@ interface ILendingMarketController {
         uint256 _unitPrice
     ) external returns (bool);
 
+    function depositAndExecuteOrder(
+        bytes32 ccy,
+        uint256 maturity,
+        ProtocolTypes.Side side,
+        uint256 amount,
+        uint256 unitPrice
+    ) external payable returns (bool);
+
     function cancelOrder(
         bytes32 _ccy,
         uint256 _maturity,
@@ -130,6 +138,9 @@ interface ILendingMarket {
     function isOpened(uint8 orderBookId) external view returns (bool);
     function isPreOrderPeriod(uint8 orderBookId) external view returns (bool);
     function isItayosePeriod(uint8 orderBookId) external view returns (bool);
+    function getBestLendUnitPrice(
+        uint8 orderBookId
+    ) external view returns (uint256 unitPrice);
     function getBestBorrowUnitPrice(
         uint8 orderBookId
     ) external view returns (uint256 unitPrice);

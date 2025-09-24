@@ -40,7 +40,7 @@ contract StrategyFactory {
         address _tokenVault,
         bytes32 _currency,
         uint256 _minTendAmount,
-        uint256 _maxMaturities,
+        uint256 _minAPR,
         uint256[] calldata _allocationRatios
     ) external virtual returns (address) {
         // tokenized strategies available setters.
@@ -53,7 +53,7 @@ contract StrategyFactory {
                     _tokenVault,
                     _currency,
                     _minTendAmount,
-                    _maxMaturities,
+                    _minAPR,
                     _allocationRatios
                 )
             )

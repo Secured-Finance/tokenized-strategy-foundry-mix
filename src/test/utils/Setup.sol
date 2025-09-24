@@ -24,8 +24,12 @@ contract Setup is Test, IEvents {
     // Contract instances that we will use repeatedly.
     ERC20 public asset;
     IStrategyInterface public strategy;
-
     StrategyFactory public strategyFactory;
+
+    ILendingMarketController public lendingMarketController;
+    ITokenVault public tokenVault;
+    ILendingMarket public lendingMarket;
+    bytes32 public currency;
 
     mapping(string => address) public tokenAddrs;
     mapping(string => address) public contractAddrs;
@@ -43,6 +47,7 @@ contract Setup is Test, IEvents {
     // Integer variables that will be used repeatedly.
     uint256 public decimals;
     uint256 public MAX_BPS = 10_000;
+    uint256 public SECONDS_PER_YEAR = 365 days;
 
     // Fuzz from $0.01 of 1e6 stable coins up to 1 trillion of a 1e18 coin
     uint256 public maxFuzzAmount = 1e30;
@@ -72,6 +77,10 @@ contract Setup is Test, IEvents {
         strategy = IStrategyInterface(setUpStrategy());
 
         factory = strategy.FACTORY();
+        lendingMarketController = strategy.lendingMarketController();
+        tokenVault = strategy.tokenVault();
+        lendingMarket = strategy.lendingMarket();
+        currency = strategy.currency();
 
         // label all the used addresses for traces
         vm.label(keeper, "keeper");
@@ -97,7 +106,7 @@ contract Setup is Test, IEvents {
                     contractAddrs["TokenVault"],
                     "USDC",
                     1e6, // 1 USDC
-                    2, // maxMaturities
+                    100, // minAPR 1%
                     allocationRatios
                 )
             )
@@ -135,15 +144,12 @@ contract Setup is Test, IEvents {
 
     // For checking the amounts in the strategy
     function checkStrategyTotals(
-        IStrategyInterface _strategy,
         uint256 _totalAssets,
         uint256 _totalDebt,
         uint256 _totalIdle
     ) public {
-        uint256 _assets = _strategy.totalAssets();
-        uint256 _balance = ERC20(_strategy.asset()).balanceOf(
-            address(_strategy)
-        );
+        uint256 _assets = strategy.totalAssets();
+        uint256 _balance = ERC20(strategy.asset()).balanceOf(address(strategy));
         uint256 _idle = _balance > _assets ? _assets : _balance;
         uint256 _debt = _assets - _idle;
         assertEq(_assets, _totalAssets, "!totalAssets");
@@ -172,21 +178,13 @@ contract Setup is Test, IEvents {
     }
 
     function changeMarketPrice(
-        IStrategyInterface _strategy,
-        uint256 _maturity
+        uint256 _maturity,
+        uint256 _priceIncrement
     ) public {
-        ILendingMarketController lendingMarketController = ILendingMarketController(
-                contractAddrs["LendingMarketController"]
-            );
-        ITokenVault tokenVault = ITokenVault(contractAddrs["TokenVault"]);
-
-        bytes32 currency = _strategy.currency();
         uint256 amount = 1e9; // 1,000 USDC
-        uint256 newUnitPrice = _getNewUnitPrice(
-            lendingMarketController,
-            currency,
-            _maturity
-        );
+        uint256 newUnitPrice = _getNewUnitPrice(_maturity, _priceIncrement);
+
+        airdrop(asset, management, amount * 2);
 
         // Deposit
         vm.prank(management);
@@ -211,40 +209,116 @@ contract Setup is Test, IEvents {
             _maturity,
             ProtocolTypes.Side.Borrow,
             amount,
-            0
+            newUnitPrice
+        );
+
+        skip(1 minutes);
+    }
+
+    function placeLendOrderAtMarketUnitPrice(
+        uint256 _maturity,
+        uint256 _amount
+    ) public {
+        uint8 orderBookId = lendingMarketController.getOrderBookId(
+            currency,
+            _maturity
+        );
+        uint256 bestLendUnitPrice = lendingMarket.getBestLendUnitPrice(
+            orderBookId
+        );
+        uint256 unitPrice = lendingMarket.getMarketUnitPrice(orderBookId);
+
+        if (unitPrice == 0 || bestLendUnitPrice <= unitPrice) {
+            unitPrice = bestLendUnitPrice - 1;
+        }
+
+        airdrop(asset, management, _amount);
+
+        vm.prank(management);
+        asset.approve(address(tokenVault), _amount);
+
+        vm.prank(management);
+        lendingMarketController.depositAndExecuteOrder(
+            currency,
+            _maturity,
+            ProtocolTypes.Side.Lend,
+            _amount,
+            unitPrice
         );
     }
 
+    function calculateMaxLossExpected(
+        uint256 _maturity,
+        uint256 _amount
+    ) public view returns (uint256) {
+        uint8 orderBookId = lendingMarketController.getOrderBookId(
+            currency,
+            _maturity
+        );
+        uint256 bestBorrowUnitPrice = lendingMarket.getBestBorrowUnitPrice(
+            orderBookId
+        );
+
+        uint256 marketUnitPrice = lendingMarket.getMarketUnitPrice(orderBookId);
+
+        if (marketUnitPrice < bestBorrowUnitPrice) {
+            return 0;
+        }
+
+        return calculateOrderFeeAmount(_maturity, _amount);
+    }
+
+    function calculateOrderFeeAmount(
+        uint256 _maturity,
+        uint256 _amount
+    ) public view returns (uint256 orderFeeAmount) {
+        if (block.timestamp >= _maturity) return 0;
+
+        uint256 orderFeeRate = strategy.lendingMarket().getOrderFeeRate();
+        uint256 duration = _maturity - block.timestamp;
+
+        // NOTE: The formula is:
+        // actualRate = feeRate * (duration / SECONDS_IN_YEAR)
+        // orderFeeAmount = amount * actualRate
+        orderFeeAmount =
+            (orderFeeRate * duration * _amount) /
+            (SECONDS_PER_YEAR * MAX_BPS);
+    }
+
     function _setTokenAddrs() internal {
+        // Mainnet
         tokenAddrs["WBTC"] = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
-        tokenAddrs["YFI"] = 0x0bc529c00C6401aEF6D220BE8C6Ea1667F6Ad93e;
         tokenAddrs["WETH"] = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
-        tokenAddrs["LINK"] = 0x514910771AF9Ca656af840dff83E8264EcF986CA;
-        tokenAddrs["USDT"] = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
-        tokenAddrs["DAI"] = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
         tokenAddrs["USDC"] = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+
+        // Sepolia
+        // tokenAddrs["USDC"] = 0x2A4cf28227baB81e3880517Bb1f526cD29638cd6;
     }
 
     function _setContractAddrs() internal {
+        // Mainnet
         contractAddrs[
             "LendingMarketController"
         ] = 0x35e9D8e0223A75E51a67aa731127C91Ea0779Fe2;
         contractAddrs[
             "TokenVault"
         ] = 0xB74749b2213916b1dA3b869E41c7c57f1db69393;
+
+        // Sepolia
+        // contractAddrs[
+        //     "LendingMarketController"
+        // ] = 0xBFFC9E7d6FAbBc5B154F39F3103783942853A053;
+        // contractAddrs[
+        //     "TokenVault"
+        // ] = 0xa7A13c85296d5c6aebaeE99ee40761E2bB105f92;
     }
 
     function _getNewUnitPrice(
-        ILendingMarketController lendingMarketController,
-        bytes32 _currency,
-        uint256 _maturity
+        uint256 _maturity,
+        uint256 _priceIncrement
     ) internal view returns (uint256) {
-        ILendingMarket lendingMarket = ILendingMarket(
-            lendingMarketController.getLendingMarket(_currency)
-        );
-
         uint8 orderBookId = lendingMarketController.getOrderBookId(
-            _currency,
+            currency,
             _maturity
         );
         uint256 marketUnitPrice = lendingMarket.getMarketUnitPrice(orderBookId);
@@ -252,11 +326,15 @@ contract Setup is Test, IEvents {
             orderBookId
         );
 
-        return
-            (
-                bestBorrowUnitPrice > marketUnitPrice
-                    ? bestBorrowUnitPrice
-                    : marketUnitPrice
-            ) + 1;
+        uint256 newUnitPrice = marketUnitPrice + _priceIncrement;
+
+        if (bestBorrowUnitPrice >= newUnitPrice) {
+            newUnitPrice = bestBorrowUnitPrice + 1;
+        }
+        if (newUnitPrice > strategy.BASIS_POINTS()) {
+            newUnitPrice = strategy.BASIS_POINTS();
+        }
+
+        return newUnitPrice;
     }
 }
