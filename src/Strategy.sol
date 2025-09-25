@@ -4,7 +4,10 @@ pragma solidity ^0.8.18;
 import {BaseStrategy, ERC20} from "@tokenized-strategy/BaseStrategy.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ILendingMarketController, ILendingMarket, ITokenVault, ProtocolTypes, GetOrderEstimationFromFVParams} from "./interfaces/ISecuredFinance.sol";
+import {ILendingMarketController} from "@secured-finance/interfaces/ILendingMarketController.sol";
+import {ILendingMarket} from "@secured-finance/interfaces/ILendingMarket.sol";
+import {ITokenVault} from "@secured-finance/interfaces/ITokenVault.sol";
+import {ProtocolTypes} from "@secured-finance/types/ProtocolTypes.sol";
 
 /**
  * The `TokenizedStrategy` variable can be used to retrieve the strategies
@@ -354,11 +357,11 @@ contract Strategy is BaseStrategy {
                 ,
                 bool isInsufficientDepositAmount
             ) = lendingMarketController.getOrderEstimationFromFV(
-                    GetOrderEstimationFromFVParams({
+                    ILendingMarketController.GetOrderEstimationFromFVParams({
                         ccy: currency,
                         maturity: orderBook.maturity,
                         user: address(this),
-                        side: ProtocolTypes.Side.Borrow,
+                        side: ProtocolTypes.Side.BORROW,
                         amountInFV: futureValue + totalExistingAmountInFV,
                         additionalDepositAmount: 0,
                         ignoreBorrowedAmount: true
@@ -691,7 +694,7 @@ contract Strategy is BaseStrategy {
         bool success = lendingMarketController.executeOrder(
             currency,
             maturity,
-            ProtocolTypes.Side.Lend,
+            ProtocolTypes.Side.LEND,
             amount,
             unitPrice
         );

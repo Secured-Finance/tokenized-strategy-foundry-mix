@@ -7,10 +7,13 @@ import {Test} from "forge-std/Test.sol";
 import {ERC20} from "../../Strategy.sol";
 import {StrategyFactory} from "../../StrategyFactory.sol";
 import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
-import {ILendingMarket, ILendingMarketController, ITokenVault, ProtocolTypes} from "../../interfaces/ISecuredFinance.sol";
 
 // Inherit the events so they can be checked if desired.
 import {IEvents} from "@tokenized-strategy/interfaces/IEvents.sol";
+import {ILendingMarketController} from "@secured-finance/interfaces/ILendingMarketController.sol";
+import {ILendingMarket} from "@secured-finance/interfaces/ILendingMarket.sol";
+import {ITokenVault} from "@secured-finance/interfaces/ITokenVault.sol";
+import {ProtocolTypes} from "@secured-finance/types/ProtocolTypes.sol";
 
 interface IFactory {
     function governance() external view returns (address);
@@ -197,7 +200,7 @@ contract Setup is Test, IEvents {
         lendingMarketController.executeOrder(
             currency,
             _maturity,
-            ProtocolTypes.Side.Lend,
+            ProtocolTypes.Side.LEND,
             amount,
             newUnitPrice
         );
@@ -207,7 +210,7 @@ contract Setup is Test, IEvents {
         lendingMarketController.executeOrder(
             currency,
             _maturity,
-            ProtocolTypes.Side.Borrow,
+            ProtocolTypes.Side.BORROW,
             amount,
             newUnitPrice
         );
@@ -241,7 +244,7 @@ contract Setup is Test, IEvents {
         lendingMarketController.depositAndExecuteOrder(
             currency,
             _maturity,
-            ProtocolTypes.Side.Lend,
+            ProtocolTypes.Side.LEND,
             _amount,
             unitPrice
         );
