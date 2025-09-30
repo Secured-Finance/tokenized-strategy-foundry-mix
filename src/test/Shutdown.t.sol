@@ -1,7 +1,8 @@
 pragma solidity ^0.8.18;
 
 import "forge-std/console2.sol";
-import {Setup, ERC20, IStrategyInterface} from "./utils/Setup.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {Setup} from "./utils/Setup.sol";
 
 contract ShutdownTest is Setup {
     function setUp() public virtual override {
@@ -17,7 +18,8 @@ contract ShutdownTest is Setup {
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
         // Earn Interest
-        skip(1 days);
+        uint256[] memory maturities = strategy.getTargetMaturities();
+        changeMarketPrice(maturities[0], 1);
 
         // Shutdown the strategy
         vm.prank(emergencyAdmin);
@@ -29,12 +31,14 @@ contract ShutdownTest is Setup {
         uint256 balanceBefore = asset.balanceOf(user);
 
         // Withdraw all funds
+        uint256 availableWithdrawLimit = strategy.availableWithdrawLimit(user);
+        uint256 withdrawableAmount = Math.min(_amount, availableWithdrawLimit);
         vm.prank(user);
-        strategy.redeem(_amount, user, user);
+        strategy.redeem(withdrawableAmount, user, user);
 
         assertGe(
             asset.balanceOf(user),
-            balanceBefore + _amount,
+            balanceBefore + withdrawableAmount,
             "!final balance"
         );
     }
@@ -48,7 +52,8 @@ contract ShutdownTest is Setup {
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
         // Earn Interest
-        skip(1 days);
+        uint256[] memory maturities = strategy.getTargetMaturities();
+        changeMarketPrice(maturities[0], 1);
 
         // Shutdown the strategy
         vm.prank(emergencyAdmin);
@@ -64,12 +69,15 @@ contract ShutdownTest is Setup {
         uint256 balanceBefore = asset.balanceOf(user);
 
         // Withdraw all funds
+        uint256 availableWithdrawLimit = strategy.availableWithdrawLimit(user);
+        uint256 withdrawableAmount = Math.min(_amount, availableWithdrawLimit);
+
         vm.prank(user);
-        strategy.redeem(_amount, user, user);
+        strategy.redeem(withdrawableAmount, user, user);
 
         assertGe(
             asset.balanceOf(user),
-            balanceBefore + _amount,
+            balanceBefore + withdrawableAmount,
             "!final balance"
         );
     }
