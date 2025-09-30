@@ -4,10 +4,7 @@ pragma solidity ^0.8.18;
 import "forge-std/console2.sol";
 import {Test} from "forge-std/Test.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-
-import {ERC20} from "../../Strategy.sol";
-import {StrategyFactory} from "../../StrategyFactory.sol";
-import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
+import {ERC20} from "@tokenized-strategy/BaseStrategy.sol";
 
 // Inherit the events so they can be checked if desired.
 import {IEvents} from "@tokenized-strategy/interfaces/IEvents.sol";
@@ -15,6 +12,9 @@ import {ILendingMarketController} from "@secured-finance/interfaces/ILendingMark
 import {ILendingMarket} from "@secured-finance/interfaces/ILendingMarket.sol";
 import {ITokenVault} from "@secured-finance/interfaces/ITokenVault.sol";
 import {ProtocolTypes} from "@secured-finance/types/ProtocolTypes.sol";
+
+import {StrategyFactory} from "../../StrategyFactory.sol";
+import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
 
 interface IFactory {
     function governance() external view returns (address);

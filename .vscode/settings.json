@@ -5,6 +5,6 @@
     "forge-std/=./lib/forge-std/src/",
     "@tokenized-strategy/=./lib/tokenized-strategy/src/",
     "@periphery/=./lib/tokenized-strategy-periphery/src/",
-    "@secured-finance/=./=lib/contracts/contracts/protocol/"
+    "@secured-finance/=./lib/contracts/contracts/protocol/"
   ]
 }

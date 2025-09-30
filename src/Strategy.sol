@@ -205,8 +205,10 @@ contract Strategy is BaseStrategy {
                 }
 
                 // Calculate how much we need to unwind to free the remaining amount
+                uint256 unitPrice = lastMarketUnitPrices[orderBook.maturity];
+                require(unitPrice > 0, "No market price stored");
                 uint256 remainingAmountInFV = (remainingAmount * BASIS_POINTS) /
-                    lastMarketUnitPrices[orderBook.maturity];
+                    unitPrice;
 
                 // Unwind position with cap to avoid excessive losses and get the filled amount in future value
                 (
