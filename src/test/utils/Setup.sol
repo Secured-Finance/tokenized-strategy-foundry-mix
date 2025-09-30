@@ -181,14 +181,11 @@ contract Setup is Test, IEvents {
         strategy.setPerformanceFee(_performanceFee);
     }
 
-    function changeMarketPrice(
-        uint256 _maturity,
-        uint256 _priceIncrement
-    ) public {
+    function changeMarketPrice(uint256 _maturity, int256 _priceChange) public {
         skip(1 minutes);
 
         uint256 amount = 1e10; // 10,000 USDC
-        uint256 newUnitPrice = _getNewUnitPrice(_maturity, _priceIncrement);
+        uint256 newUnitPrice = _getNewUnitPrice(_maturity, _priceChange);
 
         airdrop(asset, management, amount * 2);
 
@@ -256,6 +253,31 @@ contract Setup is Test, IEvents {
         );
     }
 
+    function placeBorrowOrder(
+        uint256 _maturity,
+        uint256 _unitPrice,
+        uint256 _amount
+    ) public {
+        uint256 depositAmount = _amount * 2;
+
+        airdrop(asset, management, depositAmount);
+
+        vm.prank(management);
+        asset.approve(address(tokenVault), depositAmount);
+
+        vm.prank(management);
+        tokenVault.deposit(currency, depositAmount);
+
+        vm.prank(management);
+        lendingMarketController.executeOrder(
+            currency,
+            _maturity,
+            ProtocolTypes.Side.BORROW,
+            _amount,
+            _unitPrice
+        );
+    }
+
     function placeBorrowOrderAtMarketUnitPrice(
         uint256 _maturity,
         uint256 _amount,
@@ -278,24 +300,7 @@ contract Setup is Test, IEvents {
                 : bestBorrowUnitPrice;
         }
 
-        uint256 depositAmount = _amount * 2;
-
-        airdrop(asset, management, depositAmount);
-
-        vm.prank(management);
-        asset.approve(address(tokenVault), depositAmount);
-
-        vm.prank(management);
-        tokenVault.deposit(currency, depositAmount);
-
-        vm.prank(management);
-        lendingMarketController.executeOrder(
-            currency,
-            _maturity,
-            ProtocolTypes.Side.BORROW,
-            _amount,
-            unitPrice
-        );
+        placeBorrowOrder(_maturity, unitPrice, _amount);
     }
 
     function cancelBorrowOrders(address _user, uint256 _maturity) public {
@@ -409,7 +414,7 @@ contract Setup is Test, IEvents {
 
     function _getNewUnitPrice(
         uint256 _maturity,
-        uint256 _priceIncrement
+        int256 _priceChange
     ) internal view returns (uint256) {
         uint8 orderBookId = lendingMarketController.getOrderBookId(
             currency,
@@ -420,7 +425,17 @@ contract Setup is Test, IEvents {
             orderBookId
         );
 
-        uint256 newUnitPrice = marketUnitPrice + _priceIncrement;
+        uint256 newUnitPrice;
+        if (_priceChange >= 0) {
+            newUnitPrice = marketUnitPrice + uint256(_priceChange);
+        } else {
+            uint256 absoluteChange = uint256(-_priceChange);
+            require(
+                marketUnitPrice >= absoluteChange,
+                "Price cannot go below zero"
+            );
+            newUnitPrice = marketUnitPrice - absoluteChange;
+        }
 
         if (bestBorrowUnitPrice >= newUnitPrice) {
             newUnitPrice = bestBorrowUnitPrice + 1;

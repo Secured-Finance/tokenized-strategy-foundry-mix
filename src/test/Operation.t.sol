@@ -425,6 +425,95 @@ contract OperationTest is Setup {
         );
     }
 
+    function test_unprofitableReport_withFilledOrders(uint256 _amount) public {
+        vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
+
+        // Calculate max loss expected
+        uint256[] memory maturities = strategy.getTargetMaturities();
+
+        // Place a borrow order with large amount to ensure filling all orders at market unit price
+        for (uint256 i = 0; i < maturities.length; i++) {
+            placeBorrowOrderAtMarketUnitPrice(maturities[i], 1e36, false);
+            cancelBorrowOrders(management, maturities[i]);
+        }
+
+        // Deposit into strategy
+        mintAndDepositIntoStrategy(strategy, user, _amount);
+
+        // Fill all lend orders on the first maturity
+        placeBorrowOrder(maturities[0], 0, 1e36);
+
+        assertEq(strategy.totalAssets(), _amount, "!totalAssets");
+
+        // Report profit
+        vm.prank(keeper);
+        (uint256 initialProfit, uint256 initialLoss) = strategy.report();
+        (int256 presentValueBefore, ) = lendingMarketController.getPosition(
+            currency,
+            maturities[0],
+            address(strategy)
+        );
+
+        // Assert initialProfit is less than or equal to 0.01% of _amount
+        assertLe((initialProfit * MAX_BPS) / _amount, 1, "!initialProfit");
+        assertGe(initialLoss, 0, "!initialLoss");
+        assertGt(presentValueBefore, 0, "!presentValueBefore");
+
+        // Cause a loss by decreasing the market price
+        changeMarketPrice(maturities[0], -50);
+
+        (int256 presentValueAfter, ) = lendingMarketController.getPosition(
+            currency,
+            maturities[0],
+            address(strategy)
+        );
+        assertGt(presentValueAfter, 0, "!presentValueAfter");
+
+        // Calculate expected loss
+        uint256 expectedLoss = uint256(presentValueBefore) -
+            uint256(presentValueAfter);
+
+        // Report profit
+        vm.prank(keeper);
+        (uint256 profit, uint256 loss) = strategy.report();
+
+        // Check return Values
+        assertEq(profit, 0, "!profit");
+        assertGt(loss, expectedLoss - MAX_ROUNDING_ERROR, "!loss");
+
+        skip(strategy.profitMaxUnlockTime());
+
+        // Place lend orders for unwinding
+        for (uint256 i = 0; i < maturities.length; i++) {
+            placeLendOrderAtMarketUnitPrice(maturities[i], 1e36, false);
+        }
+
+        uint256 balanceBefore = asset.balanceOf(user);
+
+        // Withdraw all funds
+        (
+            uint256 maxOrderLoss,
+            uint256 orderFeeRate
+        ) = calculateMaxUnwindingLossExpected(address(strategy), maturities[0]);
+        uint256 availableWithdrawLimit = strategy.availableWithdrawLimit(user);
+        uint256 withdrawableAmount = Math.min(
+            strategy.convertToAssets(strategy.balanceOf(user)),
+            availableWithdrawLimit
+        );
+
+        vm.prank(user);
+        strategy.withdraw(withdrawableAmount, user, user, orderFeeRate);
+
+        assertGe(
+            asset.balanceOf(user),
+            balanceBefore +
+                withdrawableAmount -
+                maxOrderLoss -
+                MAX_ROUNDING_ERROR,
+            "!final balance"
+        );
+    }
+
     function test_tendTrigger(uint256 _amount) public {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
 
