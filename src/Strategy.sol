@@ -219,8 +219,12 @@ contract Strategy is BaseStrategy {
                         remainingAmountInFV
                     );
 
-                uint256 freedAmount = ((filledAmountInFV + feeInFV) *
-                    remainingAmount) / remainingAmountInFV;
+                uint256 freedAmount = Math.mulDiv(
+                    filledAmountInFV + feeInFV,
+                    remainingAmount,
+                    remainingAmountInFV,
+                    Math.Rounding.Up
+                );
 
                 if (freedAmount > filledAmount) {
                     loss += freedAmount - filledAmount;
@@ -337,23 +341,22 @@ contract Strategy is BaseStrategy {
 
         for (uint256 i = 0; i < orderBooks.length; i++) {
             OrderBook memory orderBook = orderBooks[i];
-            (
-                uint256 totalExistingAmount,
-                uint256 totalExistingAmountInFV
-            ) = _getActiveOrders(orderBook.id);
+            (uint256 orderAmount, uint256 orderAmountInFV) = _getActiveOrders(
+                orderBook.id
+            );
 
-            uint256 futureValue = _getPositionInFV(orderBook.maturity);
+            uint256 positionAmountInFV = _getPositionInFV(orderBook.maturity);
 
-            if (futureValue == 0) {
-                _totalAmount += totalExistingAmount;
+            if (positionAmountInFV == 0) {
+                _totalAmount += orderAmount;
                 continue;
             }
 
             (
                 ,
                 uint256 filledAmount,
-                ,
-                ,
+                uint256 filledAmountInFV,
+                uint256 orderFeeInFV,
                 ,
                 bool isInsufficientDepositAmount
             ) = lendingMarketController.getOrderEstimationFromFV(
@@ -362,7 +365,7 @@ contract Strategy is BaseStrategy {
                         maturity: orderBook.maturity,
                         user: address(this),
                         side: ProtocolTypes.Side.BORROW,
-                        amountInFV: futureValue + totalExistingAmountInFV,
+                        amountInFV: positionAmountInFV + orderAmountInFV,
                         additionalDepositAmount: 0,
                         ignoreBorrowedAmount: true
                     })
@@ -373,27 +376,22 @@ contract Strategy is BaseStrategy {
                 "Insufficient deposit amount"
             );
 
-            if (filledAmount == 0) {
-                _totalAmount += totalExistingAmount;
-                continue;
-            }
-
-            // Get order fee amount
-            uint256 orderFeeRate = lendingMarket.getOrderFeeRate();
-            uint256 extraOrderFeeAmount = filledAmount > totalExistingAmount
-                ? _calculateOrderFeeAmount(
-                    orderBook.maturity,
-                    filledAmount - totalExistingAmount,
-                    orderFeeRate
-                )
-                : 0;
-
             // In an actual withdraw, the placed orders will be cancelled before unwinding
             // and the funds will be returned to TokenVault.
             // However, this estimation is triggered without cancelling orders
             // so the filled amount is the amount that would be freed including the placed orders.
             // Therefore, we need to adjust the total amount to account for the order fee.
-            _totalAmount += filledAmount + extraOrderFeeAmount;
+            if (orderAmountInFV < filledAmountInFV + orderFeeInFV) {
+                uint256 orderFeeRate = lendingMarket.getOrderFeeRate();
+                uint256 orderFeeAmount = _calculateOrderFeeAmount(
+                    orderBook.maturity,
+                    orderAmount,
+                    orderFeeRate
+                );
+                _totalAmount += filledAmount + orderFeeAmount;
+            } else {
+                _totalAmount += orderAmount;
+            }
         }
     }
 
@@ -882,6 +880,8 @@ contract Strategy is BaseStrategy {
             maturity,
             address(this)
         );
+
+        require(presentValue >= 0, "Invalid present value");
 
         return (uint256(presentValue));
     }

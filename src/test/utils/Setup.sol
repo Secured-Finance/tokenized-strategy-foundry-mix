@@ -3,6 +3,7 @@ pragma solidity ^0.8.18;
 
 import "forge-std/console2.sol";
 import {Test} from "forge-std/Test.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {ERC20} from "../../Strategy.sol";
 import {StrategyFactory} from "../../StrategyFactory.sol";
@@ -184,7 +185,9 @@ contract Setup is Test, IEvents {
         uint256 _maturity,
         uint256 _priceIncrement
     ) public {
-        uint256 amount = 1e9; // 1,000 USDC
+        skip(1 minutes);
+
+        uint256 amount = 1e10; // 10,000 USDC
         uint256 newUnitPrice = _getNewUnitPrice(_maturity, _priceIncrement);
 
         airdrop(asset, management, amount * 2);
@@ -220,7 +223,8 @@ contract Setup is Test, IEvents {
 
     function placeLendOrderAtMarketUnitPrice(
         uint256 _maturity,
-        uint256 _amount
+        uint256 _amount,
+        bool _isPostOnly
     ) public {
         uint8 orderBookId = lendingMarketController.getOrderBookId(
             currency,
@@ -231,8 +235,10 @@ contract Setup is Test, IEvents {
         );
         uint256 unitPrice = lendingMarket.getMarketUnitPrice(orderBookId);
 
-        if (unitPrice == 0 || bestLendUnitPrice <= unitPrice) {
-            unitPrice = bestLendUnitPrice - 1;
+        if (unitPrice == 0 && bestLendUnitPrice == MAX_BPS) {
+            unitPrice = 9900;
+        } else if (unitPrice == 0 || bestLendUnitPrice <= unitPrice) {
+            unitPrice = _isPostOnly ? bestLendUnitPrice - 1 : bestLendUnitPrice;
         }
 
         airdrop(asset, management, _amount);
@@ -250,10 +256,73 @@ contract Setup is Test, IEvents {
         );
     }
 
+    function placeBorrowOrderAtMarketUnitPrice(
+        uint256 _maturity,
+        uint256 _amount,
+        bool _isPostOnly
+    ) public {
+        uint8 orderBookId = lendingMarketController.getOrderBookId(
+            currency,
+            _maturity
+        );
+        uint256 bestBorrowUnitPrice = lendingMarket.getBestBorrowUnitPrice(
+            orderBookId
+        );
+        uint256 unitPrice = lendingMarket.getMarketUnitPrice(orderBookId);
+
+        if (unitPrice == 0 && bestBorrowUnitPrice == 0) {
+            unitPrice = 9900;
+        } else if (unitPrice == 0 || bestBorrowUnitPrice >= unitPrice) {
+            unitPrice = _isPostOnly
+                ? bestBorrowUnitPrice + 1
+                : bestBorrowUnitPrice;
+        }
+
+        uint256 depositAmount = _amount * 2;
+
+        airdrop(asset, management, depositAmount);
+
+        vm.prank(management);
+        asset.approve(address(tokenVault), depositAmount);
+
+        vm.prank(management);
+        tokenVault.deposit(currency, depositAmount);
+
+        vm.prank(management);
+        lendingMarketController.executeOrder(
+            currency,
+            _maturity,
+            ProtocolTypes.Side.BORROW,
+            _amount,
+            unitPrice
+        );
+    }
+
+    function cancelBorrowOrders(address _user, uint256 _maturity) public {
+        uint8 orderBookId = lendingMarketController.getOrderBookId(
+            currency,
+            _maturity
+        );
+
+        (uint48[] memory activeOrderIds, ) = lendingMarket.getBorrowOrderIds(
+            orderBookId,
+            _user
+        );
+
+        for (uint256 i = 0; i < activeOrderIds.length; i++) {
+            vm.prank(_user);
+            lendingMarketController.cancelOrder(
+                currency,
+                _maturity,
+                activeOrderIds[i]
+            );
+        }
+    }
+
     function calculateMaxLossExpected(
         uint256 _maturity,
         uint256 _amount
-    ) public view returns (uint256) {
+    ) public view returns (uint256 maxLoss) {
         uint8 orderBookId = lendingMarketController.getOrderBookId(
             currency,
             _maturity
@@ -268,14 +337,29 @@ contract Setup is Test, IEvents {
             return 0;
         }
 
-        return calculateOrderFeeAmount(_maturity, _amount);
+        (maxLoss, ) = _calculateOrderFeeAmount(_maturity, _amount);
     }
 
-    function calculateOrderFeeAmount(
+    function calculateMaxUnwindingLossExpected(
+        address _user,
+        uint256 _maturity
+    ) public view returns (uint256 maxLoss, uint256 orderFeeRate) {
+        (int256 presentValue, ) = lendingMarketController.getPosition(
+            currency,
+            _maturity,
+            _user
+        );
+
+        assertGe(presentValue, 0, "Invalid present value");
+
+        return _calculateOrderFeeAmount(_maturity, uint256(presentValue));
+    }
+
+    function _calculateOrderFeeAmount(
         uint256 _maturity,
         uint256 _amount
-    ) public view returns (uint256 orderFeeAmount) {
-        if (block.timestamp >= _maturity) return 0;
+    ) internal view returns (uint256, uint256) {
+        if (block.timestamp >= _maturity) return (0, 0);
 
         uint256 orderFeeRate = strategy.lendingMarket().getOrderFeeRate();
         uint256 duration = _maturity - block.timestamp;
@@ -283,9 +367,16 @@ contract Setup is Test, IEvents {
         // NOTE: The formula is:
         // actualRate = feeRate * (duration / SECONDS_IN_YEAR)
         // orderFeeAmount = amount * actualRate
-        orderFeeAmount =
-            (orderFeeRate * duration * _amount) /
+        uint256 orderFeeAmount = (orderFeeRate * duration * _amount) /
             (SECONDS_PER_YEAR * MAX_BPS);
+        uint256 actualFeeRate = Math.mulDiv(
+            orderFeeRate,
+            duration,
+            SECONDS_PER_YEAR,
+            Math.Rounding.Up
+        );
+
+        return (orderFeeAmount, actualFeeRate);
     }
 
     function _setTokenAddrs() internal {
